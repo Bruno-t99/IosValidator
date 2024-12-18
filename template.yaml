@@ -1,15 +1,37 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template for deploying iOS Validator
+Description: CloudFormation template to deploy the iOS Validator application using ECS and EC2.
 
 Parameters:
+  AWSAccessKeyId:
+    Type: String
+    Description: AWS Access Key ID for the application.
+  AWSSecretAccessKey:
+    Type: String
+    Description: AWS Secret Access Key for the application.
+  AWSRegion:
+    Type: String
+    Default: us-east-1
+    Description: AWS Region where the resources will be created.
+  SQSQueueUrl:
+    Type: String
+    Description: The URL of the SQS queue for receipt processing.
   ClusterName:
     Type: String
     Default: ReceiptValidatorCluster
-    Description: Name of the ECS Cluster
-  InstanceType:
+    Description: Name of the ECS cluster.
+  EC2InstanceType:
     Type: String
     Default: t2.micro
-    Description: EC2 Instance Type
+    Description: Instance type for the ECS container instances (free tier eligible).
+  Subnet1:
+    Type: String
+    Description: The first subnet ID for the ECS cluster.
+  Subnet2:
+    Type: String
+    Description: The second subnet ID for the ECS cluster.
+  KeyName:
+    Type: String
+    Description: Name of the EC2 key pair.
 
 Resources:
   ECSCluster:
@@ -17,62 +39,112 @@ Resources:
     Properties:
       ClusterName: !Ref ClusterName
 
-  EC2InstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles: [EC2InstanceRole]
-
-  EC2InstanceRole:
+  TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ECSExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
 
-  LaunchConfiguration:
-    Type: AWS::AutoScaling::LaunchConfiguration
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
     Properties:
-      ImageId: ami-0c02fb55956c7d316 # Amazon ECS-optimized AMI
-      InstanceType: !Ref InstanceType
-      IamInstanceProfile: !Ref EC2InstanceProfile
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          echo ECS_CLUSTER=${ClusterName} >> /etc/ecs/ecs.config
-      SecurityGroups:
-        - !Ref InstanceSecurityGroup
+      Family: ios-validator-task
+      Cpu: "256"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - EC2
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: ios-validator
+          Image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/ios-validator:latest
+          Essential: true
+          Memory: 1024
+          Cpu: 256
+          Environment:
+            - Name: AWS_ACCESS_KEY_ID
+              Value: !Ref AWSAccessKeyId
+            - Name: AWS_SECRET_ACCESS_KEY
+              Value: !Ref AWSSecretAccessKey
+            - Name: AWS_REGION
+              Value: !Ref AWSRegion
+            - Name: SQS_QUEUE_URL
+              Value: !Ref SQSQueueUrl
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/ios-validator
+              awslogs-region: !Ref AWSRegion
+              awslogs-stream-prefix: ios-validator
 
-  InstanceSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
     Properties:
-      GroupDescription: Enable SSH and port 80
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
+      Roles:
+        - !Ref TaskExecutionRole
 
   ECSAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      LaunchConfigurationName: !Ref LaunchConfiguration
       MinSize: 1
       MaxSize: 3
       DesiredCapacity: 1
+      LaunchConfigurationName: !Ref EC2LaunchConfiguration
       VPCZoneIdentifier:
-        - subnet-12345678 # Replace with actual subnet ID
+        - !Ref Subnet1
+        - !Ref Subnet2
+
+  EC2LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-0abcdef1234567890  # Replace with a valid Amazon Linux 2 AMI ID in your region
+      InstanceType: !Ref EC2InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          echo ECS_CLUSTER=!Ref ClusterName >> /etc/ecs/ecs.config
+          systemctl start ecs
+      KeyName: !Ref KeyName
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: EC2
+      TaskDefinition: !Ref TaskDefinition
 
 Outputs:
-  ECSClusterName:
-    Description: ECS Cluster Name
-    Value: !Ref ClusterName
+  ClusterName:
+    Value: !Ref ECSCluster
+    Description: The name of the ECS cluster.
 
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+    Description: The ARN of the ECS Task Definition.
+
+  ServiceName:
+    Value: !Ref ECSService
+    Description: The name of the ECS Service.
