@@ -26,35 +26,42 @@ loop(QueueUrl) ->
     io:format("Fetching messages from queue: ~s~n", [QueueUrl]),
 
     % Fetch messages from the queue
-    {ReceiptHandle, Receipt, PostQueue, UserId} = sqs_handler:handle_sqs_request(QueueUrl),
-    
-    io:format("Pre status: ~s~n", [Receipt]),
-    Status = receipt_validator:validate_receipt(Receipt),
+    case sqs_handler:handle_sqs_request(QueueUrl) of
+        no_messages -> 
+            io:format("No messages found. Retrying after a delay.~n"),
+            timer:sleep(5000), 
+            loop(QueueUrl); 
 
-    case Status of
-        {ok, Result} when Result == "OK" ->
-            io:format("Status: ~s~n", [Result]),
-            erlcloud_sqs:delete_message(QueueUrl, ReceiptHandle),
-            DynamoResult = dynamodb_handler:query_dynamodb(Receipt),
-            io:format("DynamoDB Result: ~p~n", [DynamoResult]),
+        {ReceiptHandle, Receipt, PostQueue, UserId} ->
+            io:format("Pre status: ~s~n", [Receipt]),
+            Status = receipt_validator:validate_receipt(Receipt),
 
-            case DynamoResult of
-                ok ->
-                    PostMessage = jsx:encode(#{ 
-                        <<"user_id">> => UserId, 
-                        <<"transaction_id">> => Receipt, 
-                        <<"status">> => <<"OK">>
-                    }),
-                    erlcloud_sqs:send_message(PostQueue, PostMessage),
-                    io:format("Message sent to PostQueue: ~s~n", [PostQueue]);
-                invalid ->
-                    io:format("Skipping due to invalid DynamoDB result.~n")
-            end;
-        {error, Reason} ->
-            io:format("Error: ~s~n", [Reason]),
-            erlcloud_sqs:delete_message(QueueUrl, ReceiptHandle)
-    end,
+            case Status of
+                {ok, Result} when Result == "OK" ->
+                    io:format("Status: ~s~n", [Result]),
+                    erlcloud_sqs:delete_message(QueueUrl, ReceiptHandle),
+                    DynamoResult = dynamodb_handler:query_dynamodb(Receipt),
+                    io:format("DynamoDB Result: ~p~n", [DynamoResult]),
 
-    % Sleep for a bit and repeat the loop
-    timer:sleep(5000),
-    loop(QueueUrl).
+                    case DynamoResult of
+                        ok ->
+                            PostMessage = jsx:encode(#{
+                                <<"user_id">> => UserId, 
+                                <<"transaction_id">> => Receipt, 
+                                <<"status">> => <<"OK">>
+                            }),
+                            erlcloud_sqs:send_message(PostQueue, PostMessage),
+                            io:format("Message sent to PostQueue: ~s~n", [PostQueue]);
+                        invalid ->
+                            io:format("Skipping due to invalid DynamoDB result.~n")
+                    end;
+                {error, Reason} ->
+                    io:format("Error: ~s~n", [Reason]),
+                    erlcloud_sqs:delete_message(QueueUrl, ReceiptHandle)
+            end,
+
+            % Sleep for a bit and repeat the loop
+            timer:sleep(5000),
+            loop(QueueUrl)
+    end.
+

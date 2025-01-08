@@ -9,9 +9,13 @@ handle_sqs_request(QueueUrl) ->
     {messages, NestedMessages} = hd(Response),
     
     case NestedMessages of
-        [] -> io:format("Queue is empty. No messages to process.~n");
-        _ -> process_messages(NestedMessages)  % QueueUrl is no longer needed here
+        [] -> 
+            io:format("Queue is empty. No messages to process.~n"),
+            no_messages; 
+        _ -> 
+            process_messages(NestedMessages)
     end.
+
 
 process_messages(NestedMessages) ->
     io:format("Messages found, processing...~n"),
